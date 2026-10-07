@@ -25,9 +25,9 @@ The script will:
 
 If you prefer manual control:
 
-1. **Install PyInstaller:**
+1. **Install PyInstaller and dependencies:**
    ```bash
-   pip install pyinstaller
+   pip install pyinstaller torch torchvision pillow customtkinter tkinterdnd2 opencv-python numpy
    ```
 
 2. **Build the executable:**

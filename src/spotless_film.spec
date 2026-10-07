@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
 
 a = Analysis(
@@ -9,7 +11,7 @@ a = Analysis(
     datas=[
         ('weights/*.pth', 'weights'),  # Include model weights
         ('*.py', '.'),  # Include all Python modules
-    ],
+    ] + collect_data_files('tkinterdnd2'),  # tkdnd native libraries
     hiddenimports=[
         'torch',
         'torchvision', 
@@ -17,6 +19,7 @@ a = Analysis(
         'PIL.Image',
         'PIL.ImageTk',
         'customtkinter',
+        'tkinterdnd2',
         'tkinter',
         'numpy',
         'cv2',

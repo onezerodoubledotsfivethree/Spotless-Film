@@ -18,7 +18,7 @@
 
 4. **Install required packages:**
    ```cmd
-   pip install pyinstaller torch torchvision pillow customtkinter opencv-python numpy
+   pip install pyinstaller torch torchvision pillow customtkinter tkinterdnd2 opencv-python numpy
    ```
 
 5. **Build the executable:**
@@ -35,8 +35,8 @@ If the automated script doesn't work:
 
 ```cmd
 cd src
-pip install pyinstaller
-pyinstaller --onefile --windowed --name SpotlessFilm spotless_film_modern.py
+pip install pyinstaller customtkinter tkinterdnd2
+pyinstaller --onefile --windowed --collect-all tkinterdnd2 --name SpotlessFilm spotless_film_modern.py
 ```
 
 The .exe will be in `dist\SpotlessFilm.exe`

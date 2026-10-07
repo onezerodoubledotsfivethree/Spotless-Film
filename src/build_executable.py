@@ -22,19 +22,21 @@ def check_pyinstaller():
 
 def check_dependencies():
     """Check and install required dependencies"""
-    required_packages = [
-        "torch",
-        "torchvision", 
-        "pillow",
-        "customtkinter",
-        "opencv-python",
-        "numpy"
-    ]
+    # pip package name -> import name
+    required_packages = {
+        "torch": "torch",
+        "torchvision": "torchvision",
+        "pillow": "PIL",
+        "customtkinter": "customtkinter",
+        "tkinterdnd2": "tkinterdnd2",
+        "opencv-python": "cv2",
+        "numpy": "numpy",
+    }
     
     missing_packages = []
-    for package in required_packages:
+    for package, module in required_packages.items():
         try:
-            __import__(package.replace("-", "_"))
+            __import__(module)
             print(f"✅ {package} is installed")
         except ImportError:
             missing_packages.append(package)
