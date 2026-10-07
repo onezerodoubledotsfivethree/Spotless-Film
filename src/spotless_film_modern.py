@@ -2278,7 +2278,14 @@ class SpotlessFilmModern:
     def find_model_files(self) -> dict:
         """Find model files - prioritize the specific weights file from main.ipynb"""
         model_paths = {'unet': None, 'lama': None}
-        
+
+        # Weights fine-tuned with train/finetune.py take priority over the stock ones
+        finetuned_path = Path(__file__).parent / "weights" / "finetuned_unet.pth"
+        if finetuned_path.exists():
+            model_paths['unet'] = str(finetuned_path)
+            print(f"✅ Found fine-tuned weights file: {finetuned_path}")
+            return model_paths
+
         # First, look for the exact weights file mentioned in main.ipynb
         exact_weight_path = Path(__file__).parent / "weights" / "v5_bce_unet_epoch30.pth"
         if exact_weight_path.exists():
