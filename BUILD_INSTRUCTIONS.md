@@ -93,7 +93,7 @@ The large size is normal - it includes Python, PyTorch, and all dependencies.
 
 ## Model Weights
 
-**Important**: Make sure your model weights (`.pth` files) are in the `src/weights/` directory before building. The executable will include them automatically.
+**Important**: Make sure your model weights (`.pth` files) are in the `src/weights/` directory before building. Download them from [Google Drive](https://drive.google.com/file/d/1yR4gk2SgU0-p_EOrihckt3gFE8_lYyq7/view?usp=sharing) and extract the `.pth` files directly into `src/weights/` (e.g. `src/weights/v5_bce_unet_epoch30.pth`, no nested folder). The executable will include them automatically.
 
 ## Platform-Specific Notes
 
