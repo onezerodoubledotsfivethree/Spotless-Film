@@ -10,6 +10,8 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import TkinterDnD, DND_FILES
 import threading
+import queue
+import gc
 from pathlib import Path
 import sys
 from PIL import Image, ImageTk
@@ -63,6 +65,10 @@ class SpotlessFilmModern:
         self.image_queue: List[str] = []
         self.current_index: int = -1
         self.image_results: dict = {}
+        # Batch processing of the whole queue
+        self.batch_running = False
+        self._batch_cancel = threading.Event()
+        self._batch_events: queue.Queue = queue.Queue()  # worker -> UI thread callbacks
         
         # Initialize split view position
         self.split_position = 0.5  # Default to middle
@@ -122,11 +128,11 @@ class SpotlessFilmModern:
     def setup_modern_sidebar(self):
         """Setup the modern CustomTkinter sidebar matching macOS design"""
         # Sidebar frame with macOS-style dark background
-        self.sidebar_frame = ctk.CTkFrame(self.main_frame, width=280, corner_radius=0, 
-                                         fg_color="#2A2A2A")
+        # Scrollable so expanded sections and long image queues never fall off-screen
+        self.sidebar_frame = ctk.CTkScrollableFrame(self.main_frame, width=264, corner_radius=0,
+                                                    fg_color="#2A2A2A")
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
-        self.sidebar_frame.grid_rowconfigure(4, weight=1)  # Empty space at bottom after all sections
-        self.sidebar_frame.grid_propagate(False)
+        self.sidebar_frame.grid_columnconfigure(0, weight=1)
         
         # Create macOS-style sidebar content
         self.create_macos_sidebar_content()
@@ -246,10 +252,32 @@ class SpotlessFilmModern:
                                             fg_color="#4A4A4A", hover_color="#5A5A5A")
         self.next_image_btn.grid(row=0, column=2)
         
-        self.queue_list_frame = ctk.CTkScrollableFrame(self.queue_frame, height=120,
+        self.queue_list_frame = ctk.CTkScrollableFrame(self.queue_frame, height=100,
                                                        fg_color="#232323")
         self.queue_list_frame.pack(fill="x")
         self.queue_item_buttons: List[ctk.CTkButton] = []
+        
+        # Batch actions for the whole queue
+        batch_frame = ctk.CTkFrame(self.queue_frame, fg_color="transparent")
+        batch_frame.pack(fill="x", pady=(5, 0))
+        batch_frame.grid_columnconfigure((0, 1), weight=1)
+        
+        self.process_all_btn = ctk.CTkButton(batch_frame, text="⚡ Process All", width=90, height=28,
+                                             command=self.toggle_batch_processing,
+                                             font=ctk.CTkFont(size=11),
+                                             fg_color="#4A4A4A", hover_color="#5A5A5A")
+        self.process_all_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        
+        self.export_all_btn = ctk.CTkButton(batch_frame, text="💾 Export All", width=90, height=28,
+                                            command=self.export_all_images, state="disabled",
+                                            font=ctk.CTkFont(size=11),
+                                            fg_color="#4A4A4A", hover_color="#5A5A5A")
+        self.export_all_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        
+        self.batch_status_label = ctk.CTkLabel(self.queue_frame, text="",
+                                               font=ctk.CTkFont(size=10), text_color="#888888",
+                                               anchor="w", justify="left", wraplength=220)
+        self.batch_status_label.pack(fill="x")
         
         self.clear_queue_btn = ctk.CTkButton(self.queue_frame, text="Clear List", height=26,
                                              command=self.clear_image_queue,
@@ -1266,9 +1294,10 @@ class SpotlessFilmModern:
         
         # Update button states
         if hasattr(self, 'detect_btn'):
-            self.detect_btn.configure(state="normal" if has_image and not self.state.processing_state.is_detecting else "disabled")
+            self.detect_btn.configure(state="normal" if has_image and not self.state.processing_state.is_detecting and not self.batch_running else "disabled")
         if hasattr(self, 'remove_btn'):
-            self.remove_btn.configure(state="normal" if has_dust_mask and not self.state.processing_state.is_removing else "disabled")
+            self.remove_btn.configure(state="normal" if has_dust_mask and not self.state.processing_state.is_removing and not self.batch_running else "disabled")
+        self.update_batch_buttons()
         if hasattr(self, 'export_btn'):
             self.export_btn.configure(state="normal" if has_processed else "disabled")
         
@@ -1492,7 +1521,7 @@ class SpotlessFilmModern:
         """Show the image at the given queue index, keeping each image's results"""
         if not (0 <= index < len(self.image_queue)):
             return
-        if self.state.processing_state.is_detecting or self.state.processing_state.is_removing:
+        if self.state.processing_state.is_detecting or self.state.processing_state.is_removing or self.batch_running:
             self.status_label.configure(text="Wait for processing to finish before switching images",
                                         text_color="orange")
             return
@@ -1549,7 +1578,7 @@ class SpotlessFilmModern:
     
     def clear_image_queue(self):
         """Forget all queued images except the one currently shown"""
-        if not (0 <= self.current_index < len(self.image_queue)):
+        if self.batch_running or not (0 <= self.current_index < len(self.image_queue)):
             return
         current = self.image_queue[self.current_index]
         self.image_queue = [current]
@@ -1585,6 +1614,188 @@ class SpotlessFilmModern:
         self.queue_position_label.configure(text=f"{self.current_index + 1} / {len(self.image_queue)}")
         self.prev_image_btn.configure(state="normal" if self.current_index > 0 else "disabled")
         self.next_image_btn.configure(state="normal" if self.current_index < len(self.image_queue) - 1 else "disabled")
+        self.update_batch_buttons()
+    
+    # MARK: - Batch Processing
+    
+    def update_batch_buttons(self):
+        """Sync batch buttons with the queue and processing state"""
+        if not hasattr(self, 'process_all_btn'):
+            return
+        if self.batch_running:
+            self.process_all_btn.configure(text="⏹ Cancel", state="normal")
+            self.export_all_btn.configure(state="disabled")
+            return
+        busy = self.state.processing_state.is_detecting or self.state.processing_state.is_removing
+        has_processed = self.state.processed_image is not None or any(
+            r.get('processed_image') is not None for r in self.image_results.values())
+        self.process_all_btn.configure(text="⚡ Process All",
+                                       state="disabled" if busy or not self.image_queue else "normal")
+        self.export_all_btn.configure(state="normal" if has_processed and not busy else "disabled")
+    
+    def toggle_batch_processing(self):
+        if self.batch_running:
+            self._batch_cancel.set()
+            self.batch_status_label.configure(text="Cancelling after the current image...")
+        else:
+            self.process_all_images()
+    
+    def process_all_images(self):
+        """Detect and remove dust for every queued image that has no result yet"""
+        if self.state.processing_state.is_detecting or self.state.processing_state.is_removing:
+            return
+        if self.state.unet_model is None:
+            messagebox.showwarning("Batch Processing", "The dust detection model is not loaded yet.")
+            return
+        
+        # Snapshot results so images with a hand-edited mask reuse it
+        self.save_current_image_results()
+        jobs = []
+        for path in self.image_queue:
+            results = self.image_results.get(path) or {}
+            if results.get('processed_image') is None:
+                jobs.append((path, results.get('raw_prediction_mask'), results.get('dust_mask')))
+        if not jobs:
+            self.batch_status_label.configure(text="All images are already processed")
+            return
+        
+        self.state.set_tool_mode(ToolMode.NONE)
+        self.batch_running = True
+        self._batch_cancel.clear()
+        self.state.notify_observers()
+        self.update_batch_buttons()
+        
+        threshold = self.state.processing_state.threshold
+        model = self.state.unet_model
+        device = self.state.device
+        total = len(jobs)
+        
+        # The worker never touches Tk directly; it queues callbacks for the UI thread
+        post = self._batch_events.put
+        
+        def set_status(text):
+            post(lambda: self.batch_status_label.configure(text=text))
+        
+        def worker():
+            done, failed = 0, []
+            start_time = time.time()
+            for i, (path, raw, mask) in enumerate(jobs):
+                if self._batch_cancel.is_set():
+                    break
+                name = os.path.basename(path)
+                prefix = f"{i + 1}/{total} {name}"
+                try:
+                    image = Image.open(path)
+                    image.load()
+                    if mask is None:
+                        set_status(f"{prefix}: detecting...")
+                        raw = ImageProcessingService.predict_dust_mask(
+                            model, image, threshold=0.5, window_size=1024, stride=512,
+                            device=device,
+                            progress_callback=lambda pr, pf=prefix: set_status(f"{pf}: detecting {int(pr * 100)}%"))
+                        mask = ImageProcessingService.create_binary_mask(raw, threshold, image.size)
+                    set_status(f"{prefix}: removing dust...")
+                    dilated = ImageProcessingService.dilate_mask(mask)
+                    image_rgb = image.convert('RGB')
+                    inpainted = self.perform_cv2_inpainting(image_rgb, dilated)
+                    processed = ImageProcessingService.blend_images(image_rgb, inpainted, dilated)
+                    results = {
+                        'raw_prediction_mask': raw,
+                        'dust_mask': mask,
+                        'original_dust_mask': mask.copy(),
+                        'processed_image': processed,
+                        'preview_processed_image': self.build_preview_image(processed),
+                    }
+                    post(lambda p=path, r=results: self._store_batch_result(p, r))
+                    done += 1
+                except Exception as e:
+                    print(f"❌ Batch processing failed for {path}: {e}")
+                    failed.append(name)
+            elapsed = time.time() - start_time
+            post(lambda: self._finish_batch(done, failed, total, elapsed))
+        
+        # Load all PIL format plugins and free unreachable Tk objects here on the UI
+        # thread, so the worker doesn't trigger Tk cleanup (which blocks) from its thread
+        Image.init()
+        gc.collect()
+        threading.Thread(target=worker, daemon=True).start()
+        self._poll_batch_events()
+    
+    def _poll_batch_events(self):
+        """UI thread: run callbacks queued by the batch worker"""
+        while True:
+            try:
+                callback = self._batch_events.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        if self.batch_running:
+            self.root.after(100, self._poll_batch_events)
+    
+    def _store_batch_result(self, path: str, results: dict):
+        """Main thread: keep a finished batch result and show it if it is the current image"""
+        self.image_results[path] = results
+        if 0 <= self.current_index < len(self.image_queue) and self.image_queue[self.current_index] == path:
+            self.restore_image_results(path)
+            self.state.set_processing_mode(ProcessingMode.SPLIT_SLIDER)
+        self.refresh_image_queue()
+    
+    def _finish_batch(self, done: int, failed: List[str], total: int, elapsed: float):
+        """Main thread: report batch outcome"""
+        self.batch_running = False
+        cancelled = self._batch_cancel.is_set()
+        summary = f"Processed {done} of {total} in {elapsed:.1f}s"
+        if cancelled:
+            summary += " (cancelled)"
+        if failed:
+            summary += f"; failed: {', '.join(failed)}"
+        self.batch_status_label.configure(text=summary)
+        self.status_label.configure(text=summary, text_color="red" if failed else "green")
+        self.state.notify_observers()
+        self.update_batch_buttons()
+    
+    def export_all_images(self):
+        """Save every processed image in the queue into a chosen folder"""
+        self.save_current_image_results()
+        to_export = [(path, self.image_results[path]['processed_image'])
+                     for path in self.image_queue
+                     if (self.image_results.get(path) or {}).get('processed_image') is not None]
+        if not to_export:
+            messagebox.showwarning("Export All", "No processed images to export")
+            return
+        
+        folder = filedialog.askdirectory(title="Choose Export Folder")
+        if not folder:
+            return
+        
+        saved, errors = 0, []
+        for path, image in to_export:
+            base, ext = os.path.splitext(os.path.basename(path))
+            ext = ext.lower() if ext.lower() in ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp') else '.png'
+            out_path = os.path.join(folder, f"{base}_dust_removed{ext}")
+            counter = 2
+            while os.path.exists(out_path):  # never overwrite existing files
+                out_path = os.path.join(folder, f"{base}_dust_removed_{counter}{ext}")
+                counter += 1
+            try:
+                if ext in ('.jpg', '.jpeg'):
+                    image.save(out_path, 'JPEG', quality=95)
+                else:
+                    image.save(out_path)
+                saved += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(path)}: {e}")
+        
+        skipped = len(self.image_queue) - len(to_export)
+        summary = f"Exported {saved} image(s) to {folder}"
+        if skipped:
+            summary += f"\n{skipped} unprocessed image(s) skipped"
+        if errors:
+            summary += "\n\nErrors:\n" + "\n".join(errors)
+            messagebox.showerror("Export All", summary)
+        else:
+            messagebox.showinfo("Export All", summary)
+        self.status_label.configure(text=summary.split("\n")[0], text_color="gray70" if not errors else "red")
     
     
     # MARK: - Processing Operations
@@ -1601,7 +1812,7 @@ class SpotlessFilmModern:
         # Deselect active tools during generation for clarity
         self.state.set_tool_mode(ToolMode.NONE)
 
-        if not self.state.can_detect_dust:
+        if not self.state.can_detect_dust or self.batch_running:
             print("❌ Cannot detect dust - preconditions not met")
             return
         
@@ -1677,7 +1888,7 @@ class SpotlessFilmModern:
         print(f"🎯 Remove dust called - can_remove_dust: {self.state.can_remove_dust}")
         print(f"🎯 State check - dust_mask: {self.state.dust_mask is not None}, is_detecting: {self.state.processing_state.is_detecting}, is_removing: {self.state.processing_state.is_removing}")
         
-        if not self.state.can_remove_dust:
+        if not self.state.can_remove_dust or self.batch_running:
             print("❌ Cannot remove dust - preconditions not met")
             return
         
