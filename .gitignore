@@ -27,6 +27,9 @@ build-dmg/
 ehthumbs.db
 Thumbs.db
 
+# Editors
+.vscode/
+
 # Python
 __pycache__/
 *.py[cod]
