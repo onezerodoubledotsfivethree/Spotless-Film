@@ -8,7 +8,7 @@ professional UI components for advanced dust removal workflow.
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
-from tkinterdnd2 import TkinterDnD
+from tkinterdnd2 import TkinterDnD, DND_FILES
 import threading
 from pathlib import Path
 import sys
@@ -57,6 +57,12 @@ class SpotlessFilmModern:
         self._split_resized_original = None
         self._split_resized_processed = None
         self._split_cached_signature = None
+        
+        # Multi-image queue: file paths in import order, index of the shown one,
+        # and per-path detection/removal results kept while switching images
+        self.image_queue: List[str] = []
+        self.current_index: int = -1
+        self.image_results: dict = {}
         
         # Initialize split view position
         self.split_position = 0.5  # Default to middle
@@ -211,13 +217,46 @@ class SpotlessFilmModern:
         self.colorspace_label.pack(anchor="w")
         
         # Choose File button
-        self.import_btn = ctk.CTkButton(parent, text="📁 Choose File",
+        self.import_btn = ctk.CTkButton(parent, text="📁 Choose Images",
                                        command=self.safe_import_image,
                                        font=ctk.CTkFont(size=12),
                                        height=32, fg_color="#4A4A4A",
                                        hover_color="#5A5A5A")
         self.import_btn.pack(fill="x", pady=(0, 5))
         self._importing = False
+        
+        # Image queue navigation (hidden until there is more than one image)
+        self.queue_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        
+        nav_frame = ctk.CTkFrame(self.queue_frame, fg_color="transparent")
+        nav_frame.pack(fill="x", pady=(5, 5))
+        nav_frame.grid_columnconfigure(1, weight=1)
+        
+        self.prev_image_btn = ctk.CTkButton(nav_frame, text="◀", width=32, height=28,
+                                            command=self.show_previous_image,
+                                            fg_color="#4A4A4A", hover_color="#5A5A5A")
+        self.prev_image_btn.grid(row=0, column=0)
+        
+        self.queue_position_label = ctk.CTkLabel(nav_frame, text="",
+                                                 font=ctk.CTkFont(size=11), text_color="#CCCCCC")
+        self.queue_position_label.grid(row=0, column=1)
+        
+        self.next_image_btn = ctk.CTkButton(nav_frame, text="▶", width=32, height=28,
+                                            command=self.show_next_image,
+                                            fg_color="#4A4A4A", hover_color="#5A5A5A")
+        self.next_image_btn.grid(row=0, column=2)
+        
+        self.queue_list_frame = ctk.CTkScrollableFrame(self.queue_frame, height=120,
+                                                       fg_color="#232323")
+        self.queue_list_frame.pack(fill="x")
+        self.queue_item_buttons: List[ctk.CTkButton] = []
+        
+        self.clear_queue_btn = ctk.CTkButton(self.queue_frame, text="Clear List", height=26,
+                                             command=self.clear_image_queue,
+                                             font=ctk.CTkFont(size=11),
+                                             fg_color="transparent", border_width=1,
+                                             border_color="#4A4A4A", hover_color="#3A3A3A")
+        self.clear_queue_btn.pack(fill="x", pady=(5, 0))
     
     def create_detection_section(self, parent):
         """Create detection section content matching macOS design"""
@@ -331,6 +370,9 @@ class SpotlessFilmModern:
             self.canvas.bind('<Button-4>', self.on_mouse_wheel)  # Linux scroll up
             self.canvas.bind('<Button-5>', self.on_mouse_wheel)  # Linux scroll down
             self.canvas.bind('<Motion>', self.on_mouse_motion)  # For brush cursor
+            # Accept one or more image files dropped onto the canvas
+            self.canvas.drop_target_register(DND_FILES)
+            self.canvas.dnd_bind('<<Drop>>', lambda e: self.handle_file_drop(list(self.root.tk.splitlist(e.data))))
         
         # Initialize zoom/pan state (kept in central state)
         self.is_panning = False
@@ -1342,15 +1384,15 @@ class SpotlessFilmModern:
             self.import_image()
         finally:
             self._importing = False
-            self.import_btn.configure(text="📁  Choose Image", state="normal")
+            self.import_btn.configure(text="📁  Choose Images", state="normal")
     
     def import_image(self):
-        """Import an image file"""
+        """Import one or more image files"""
         print("🔵 Import image button clicked")
         try:
             print("🔵 Opening file dialog...")
-            file_path = filedialog.askopenfilename(
-                title="Select Image",
+            file_paths = filedialog.askopenfilenames(
+                title="Select Images",
                 initialdir=os.path.expanduser("~"),  # Start in home directory
                 filetypes=[
                     ("Image files", "*.jpg *.jpeg *.png *.tiff *.bmp"),
@@ -1361,11 +1403,12 @@ class SpotlessFilmModern:
                 ]
             )
             
-            print(f"🔵 File dialog returned: '{file_path}' (type: {type(file_path)})")
+            # Some Tk builds return a single Tcl list string instead of a tuple
+            file_paths = [p for p in self.root.tk.splitlist(file_paths) if p and p.strip()]
+            print(f"🔵 File dialog returned {len(file_paths)} file(s)")
             
-            if file_path and file_path.strip():  # Check for valid path
-                print(f"🔵 Valid file path, loading: {file_path}")
-                self.load_image(file_path)
+            if file_paths:
+                self.add_images(file_paths)
             else:
                 print("🔵 No file selected or empty path")
                 
@@ -1375,8 +1418,8 @@ class SpotlessFilmModern:
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to open file dialog: {str(e)}")
     
-    def load_image(self, file_path: str):
-        """Load image from file path"""
+    def load_image(self, file_path: str) -> bool:
+        """Load image from file path; returns True on success"""
         print(f"🔵 Loading image: {file_path}")
         try:
             # Check if file exists
@@ -1390,6 +1433,8 @@ class SpotlessFilmModern:
             self.last_loaded_path = file_path
             # Build preview version for faster display
             self.preview_selected_image = self.build_preview_image(image)
+            self.preview_processed_image = None
+            self._split_cached_signature = None
             self.state.reset_processing()
             
             filename = os.path.basename(file_path)
@@ -1398,7 +1443,7 @@ class SpotlessFilmModern:
             print(f"✅ Can detect dust now: {self.state.can_detect_dust}")
             
             # Update UI
-            self.status_label.configure(text=f"Image loaded: {filename}")
+            self.status_label.configure(text=f"Image loaded: {filename}", text_color="gray70")
             
             # Enable detect button
             if hasattr(self, 'detect_btn'):
@@ -1406,23 +1451,140 @@ class SpotlessFilmModern:
             
             # Update canvas display
             self.update_ui()
+            return True
             
         except Exception as e:
             error_msg = f"Failed to load image: {str(e)}"
             print(f"❌ {error_msg}")
             self.status_label.configure(text=error_msg, text_color="red")
             messagebox.showerror("Error", error_msg)
+            return False
     
     def handle_file_drop(self, files: List[str]):
         """Handle drag and drop files"""
         if not files:
             return
         
-        file_path = files[0]
-        if file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp')):
-            self.load_image(file_path)
+        image_files = [f for f in files
+                       if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'))]
+        if image_files:
+            self.add_images(image_files)
         else:
             messagebox.showerror("Error", "Please drop a valid image file")
+    
+    # MARK: - Image Queue
+    
+    def add_images(self, file_paths: List[str]):
+        """Add images to the queue and show the first newly added one"""
+        first_new = None
+        for path in file_paths:
+            path = os.path.abspath(path)
+            if path not in self.image_queue:
+                self.image_queue.append(path)
+            if first_new is None:
+                first_new = path
+        
+        self.refresh_image_queue()
+        if first_new is not None:
+            self.switch_to_image(self.image_queue.index(first_new))
+    
+    def switch_to_image(self, index: int):
+        """Show the image at the given queue index, keeping each image's results"""
+        if not (0 <= index < len(self.image_queue)):
+            return
+        if self.state.processing_state.is_detecting or self.state.processing_state.is_removing:
+            self.status_label.configure(text="Wait for processing to finish before switching images",
+                                        text_color="orange")
+            return
+        if index == self.current_index and self.state.selected_image is not None:
+            return
+        
+        self.save_current_image_results()
+        path = self.image_queue[index]
+        if self.load_image(path):
+            self.current_index = index
+            self.restore_image_results(path)
+        else:
+            # Drop the unreadable file, keeping the index of the shown image valid
+            del self.image_queue[index]
+            if index < self.current_index:
+                self.current_index -= 1
+        self.refresh_image_queue()
+    
+    def save_current_image_results(self):
+        """Remember detection/removal results of the currently shown image"""
+        if not (0 <= self.current_index < len(self.image_queue)):
+            return
+        if self.state.dust_mask is None and self.state.processed_image is None:
+            return
+        self.image_results[self.image_queue[self.current_index]] = {
+            'raw_prediction_mask': self.state.raw_prediction_mask,
+            'dust_mask': self.state.dust_mask,
+            'original_dust_mask': self.state.original_dust_mask,
+            'processed_image': self.state.processed_image,
+            'preview_processed_image': self.preview_processed_image,
+        }
+    
+    def restore_image_results(self, path: str):
+        """Restore previously computed results for an image, if any"""
+        results = self.image_results.get(path)
+        if not results:
+            return
+        self.state.raw_prediction_mask = results['raw_prediction_mask']
+        self.state.dust_mask = results['dust_mask']
+        self.state.original_dust_mask = results['original_dust_mask']
+        self.state.processed_image = results['processed_image']
+        self.preview_processed_image = results['preview_processed_image']
+        self.state.create_low_res_mask()
+        if self.state.dust_mask:
+            self.state.save_mask_to_history()
+        self._split_cached_signature = None
+        self.state.notify_observers()
+    
+    def show_previous_image(self):
+        self.switch_to_image(self.current_index - 1)
+    
+    def show_next_image(self):
+        self.switch_to_image(self.current_index + 1)
+    
+    def clear_image_queue(self):
+        """Forget all queued images except the one currently shown"""
+        if not (0 <= self.current_index < len(self.image_queue)):
+            return
+        current = self.image_queue[self.current_index]
+        self.image_queue = [current]
+        self.image_results = {k: v for k, v in self.image_results.items() if k == current}
+        self.current_index = 0
+        self.refresh_image_queue()
+    
+    def refresh_image_queue(self):
+        """Rebuild the sidebar list of queued images"""
+        if not hasattr(self, 'queue_frame'):
+            return
+        
+        for btn in self.queue_item_buttons:
+            btn.destroy()
+        self.queue_item_buttons = []
+        
+        if len(self.image_queue) < 2:
+            self.queue_frame.pack_forget()
+            return
+        self.queue_frame.pack(fill="x", pady=(5, 0))
+        
+        for i, path in enumerate(self.image_queue):
+            is_current = i == self.current_index
+            marker = "✓ " if path in self.image_results else ""
+            btn = ctk.CTkButton(self.queue_list_frame, text=f"{marker}{os.path.basename(path)}",
+                                anchor="w", height=24, font=ctk.CTkFont(size=11),
+                                fg_color="#1f538d" if is_current else "transparent",
+                                hover_color="#3A3A3A",
+                                command=lambda idx=i: self.switch_to_image(idx))
+            btn.pack(fill="x", pady=1)
+            self.queue_item_buttons.append(btn)
+        
+        self.queue_position_label.configure(text=f"{self.current_index + 1} / {len(self.image_queue)}")
+        self.prev_image_btn.configure(state="normal" if self.current_index > 0 else "disabled")
+        self.next_image_btn.configure(state="normal" if self.current_index < len(self.image_queue) - 1 else "disabled")
     
     
     # MARK: - Processing Operations
