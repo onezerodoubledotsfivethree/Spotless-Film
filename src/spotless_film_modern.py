@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dust_removal_state import DustRemovalState, ProcessingMode, ToolMode
 from ui_components import SpotlessSidebar, SpotlessToolbar, ZoomControls
 from professional_canvas import SpotlessCanvas
-from image_processing import ImageProcessingService, LamaInpainter, BrushTools, ProcessingTask, UNet
+from image_processing import ImageProcessingService, LamaInpainter, LAMA_WEIGHTS_NAME, BrushTools, ProcessingTask, UNet
 from simple_modern_theme import SimpleModernTheme
 try:
     from gl_image_view import GLImageView, OPENGL_AVAILABLE, GL_IMPORT_ERROR
@@ -78,6 +78,7 @@ class SpotlessFilmModern:
         
         # Processing components
         self.lama_inpainter: Optional[LamaInpainter] = None
+        self.inpaint_method = "OpenCV"  # or "LaMa", chosen in the Dust Removal section
         self.processing_task: Optional[ProcessingTask] = None
         
         # Callback dictionary for UI components
@@ -338,6 +339,18 @@ class SpotlessFilmModern:
     
     def create_removal_section(self, parent):
         """Create dust removal section content matching macOS design"""
+        # Inpainting method (enabled once the LaMa weights are loaded)
+        self.method_selector = ctk.CTkSegmentedButton(parent, values=["OpenCV", "LaMa"],
+                                                      command=self.on_inpaint_method_changed,
+                                                      font=ctk.CTkFont(size=11), state="disabled")
+        self.method_selector.set(self.inpaint_method)
+        self.method_selector.pack(fill="x", pady=(0, 4))
+
+        self.method_hint_label = ctk.CTkLabel(parent, text="LaMa: loading...",
+                                              font=ctk.CTkFont(size=9), text_color="#666666",
+                                              anchor="w", justify="left", wraplength=220)
+        self.method_hint_label.pack(fill="x", pady=(0, 8))
+
         # Remove button
         self.remove_btn = ctk.CTkButton(parent, text="🧹 Remove Dust",
                                        command=self.remove_dust,
@@ -1298,6 +1311,7 @@ class SpotlessFilmModern:
         if hasattr(self, 'remove_btn'):
             self.remove_btn.configure(state="normal" if has_dust_mask and not self.state.processing_state.is_removing and not self.batch_running else "disabled")
         self.update_batch_buttons()
+        self.update_method_selector()
         if hasattr(self, 'export_btn'):
             self.export_btn.configure(state="normal" if has_processed else "disabled")
         
@@ -1633,6 +1647,24 @@ class SpotlessFilmModern:
                                        state="disabled" if busy or not self.image_queue else "normal")
         self.export_all_btn.configure(state="normal" if has_processed and not busy else "disabled")
     
+    def on_inpaint_method_changed(self, value: str):
+        self.inpaint_method = value
+        self.update_method_selector()
+
+    def update_method_selector(self):
+        """Sync the OpenCV/LaMa switch with model availability and processing state"""
+        if not hasattr(self, 'method_selector') or self.lama_inpainter is None:
+            return
+        if not self.lama_inpainter.available:
+            self.method_hint_label.configure(text=f"LaMa unavailable: put {LAMA_WEIGHTS_NAME} into the weights folder")
+            return
+        busy = self.state.processing_state.is_removing or self.batch_running
+        self.method_selector.configure(state="disabled" if busy else "normal")
+        if self.inpaint_method == "LaMa":
+            self.method_hint_label.configure(text="LaMa: rebuilds texture under hairs and scratches, much slower")
+        else:
+            self.method_hint_label.configure(text="OpenCV: instant, best for small dust specks")
+
     def toggle_batch_processing(self):
         if self.batch_running:
             self._batch_cancel.set()
@@ -1666,6 +1698,7 @@ class SpotlessFilmModern:
         self.update_batch_buttons()
         
         threshold = self.state.processing_state.threshold
+        method = self.inpaint_method
         model = self.state.unet_model
         device = self.state.device
         total = len(jobs)
@@ -1697,7 +1730,9 @@ class SpotlessFilmModern:
                     set_status(f"{prefix}: removing dust...")
                     dilated = ImageProcessingService.dilate_mask(mask)
                     image_rgb = image.convert('RGB')
-                    inpainted = self.perform_cv2_inpainting(image_rgb, dilated)
+                    inpainted = self.perform_inpainting(
+                        image_rgb, dilated, method,
+                        progress_callback=lambda pr, pf=prefix: set_status(f"{pf}: removing dust {int(pr * 100)}%"))
                     processed = ImageProcessingService.blend_images(image_rgb, inpainted, dilated)
                     results = {
                         'raw_prediction_mask': raw,
@@ -1988,7 +2023,7 @@ class SpotlessFilmModern:
         print("🎯 ProcessingTask started")
     
     def perform_dust_removal(self) -> Image.Image:
-        """Perform the actual dust removal process using CV2 inpainting"""
+        """Perform the actual dust removal process with the selected inpainting method"""
         print(f"🎨 perform_dust_removal called")
         print(f"🎨 Selected image available: {self.state.selected_image is not None}")
         print(f"🎨 Dust mask available: {self.state.dust_mask is not None}")
@@ -1996,8 +2031,9 @@ class SpotlessFilmModern:
         if not self.state.selected_image or not self.state.dust_mask:
             raise ValueError("Missing required components for dust removal")
         
-        print("🎨 Starting CV2 inpainting process...")
-        
+        method = self.inpaint_method
+        print(f"🎨 Starting {method} inpainting process...")
+
         # Dilate mask for better coverage
         print("🎨 Dilating mask...")
         dilated_mask = ImageProcessingService.dilate_mask(self.state.dust_mask)
@@ -2006,10 +2042,14 @@ class SpotlessFilmModern:
         print("🎨 Converting image to RGB...")
         image_rgb = self.state.selected_image.convert('RGB')
         
-        # Perform CV2 inpainting using the fallback method
-        print("🎨 Performing CV2 inpainting...")
-        inpainted = self.perform_cv2_inpainting(image_rgb, dilated_mask)
-        
+        print(f"🎨 Performing {method} inpainting...")
+
+        def report_progress(progress: float):
+            text = f"Removing dust ({method}) {int(progress * 100)}%"
+            self.root.after_idle(lambda: self.status_label.configure(text=text, text_color="gray70"))
+
+        inpainted = self.perform_inpainting(image_rgb, dilated_mask, method, progress_callback=report_progress)
+
         # Blend with original using mask
         print("🎨 Blending images...")
         final_result = ImageProcessingService.blend_images(
@@ -2021,6 +2061,15 @@ class SpotlessFilmModern:
         print("🎨 Dust removal process completed!")
         return final_result
     
+    def perform_inpainting(self, image: Image.Image, mask: Image.Image, method: str,
+                           progress_callback=None) -> Image.Image:
+        """Inpaint with the given method ("OpenCV" or "LaMa")"""
+        if method == "LaMa":
+            if self.lama_inpainter is None:
+                raise RuntimeError("LaMa model is not loaded")
+            return self.lama_inpainter.inpaint(image, mask, progress_callback=progress_callback)
+        return self.perform_cv2_inpainting(image, mask)
+
     def perform_cv2_inpainting(self, image: Image.Image, mask: Image.Image) -> Image.Image:
         """Perform single-pass CV2 TELEA inpainting (fast)."""
         import cv2
@@ -2248,12 +2297,13 @@ class SpotlessFilmModern:
                 
                 # Initialize LaMa
                 print("🤖 Initializing LaMa...")
-                self.lama_inpainter = LamaInpainter()
+                self.lama_inpainter = LamaInpainter(model_paths['lama'])
                 self.state.lama_inpainter = self.lama_inpainter
-                
+
                 lama_status = "✅ Available" if self.lama_inpainter.available else "❌ Unavailable"
                 print(f"🤖 LaMa status: {lama_status}")
                 self.root.after_idle(lambda: self.lama_label.configure(text=f"LaMa: {lama_status}"))
+                self.root.after_idle(self.update_method_selector)
                 
                 if self.state.unet_model:
                     print("🤖 All models loaded successfully")
@@ -2278,6 +2328,12 @@ class SpotlessFilmModern:
     def find_model_files(self) -> dict:
         """Find model files - prioritize the specific weights file from main.ipynb"""
         model_paths = {'unet': None, 'lama': None}
+
+        # Optional LaMa inpainting weights
+        for weights_dir in (Path(__file__).parent / "weights", Path.cwd() / "weights"):
+            if (weights_dir / LAMA_WEIGHTS_NAME).exists():
+                model_paths['lama'] = str(weights_dir / LAMA_WEIGHTS_NAME)
+                break
 
         # Weights fine-tuned with train/finetune.py take priority over the stock ones
         finetuned_path = Path(__file__).parent / "weights" / "finetuned_unet.pth"

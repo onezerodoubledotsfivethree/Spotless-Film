@@ -1,8 +1,36 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+import importlib.util
+
 from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
+
+
+def rocm_runtime_files():
+    """Runtime files of AMD's ROCm PyTorch build (Windows), if it is installed.
+
+    torch loads the ROCm DLLs from these packages by file path at import time, so they
+    must stay on disk in their original layout. Compiler tools, import libraries and
+    headers are left out.
+    """
+    files = []
+    for package in ('_rocm_sdk_core', '_rocm_sdk_libraries_custom'):
+        spec = importlib.util.find_spec(package)
+        if spec is None:
+            continue
+        root = os.path.dirname(spec.origin)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in ('__pycache__', 'include')]
+            dest = os.path.join(package, os.path.relpath(dirpath, root))
+            files += [(os.path.join(dirpath, name), dest) for name in filenames
+                      if not name.endswith(('.exe', '.lib', '.h'))]
+    return files
+
+
+rocm_files = rocm_runtime_files()
 
 a = Analysis(
     ['spotless_film_modern.py'],
@@ -11,7 +39,10 @@ a = Analysis(
     datas=[
         ('weights/*.pth', 'weights'),  # Include model weights
         ('*.py', '.'),  # Include all Python modules
-    ] + collect_data_files('tkinterdnd2'),  # tkdnd native libraries
+    ] + ([('weights/big-lama.pt', 'weights')]  # Optional LaMa inpainting weights
+         if os.path.exists(os.path.join(SPECPATH, 'weights', 'big-lama.pt')) else [])
+      + collect_data_files('tkinterdnd2')  # tkdnd native libraries
+      + rocm_files,
     hiddenimports=[
         'torch',
         'torchvision', 
@@ -27,9 +58,6 @@ a = Analysis(
         'dataclasses',
         'enum',
         'typing',
-        'lama_cleaner',
-        'lama_cleaner.model_manager',
-        'lama_cleaner.schema',
     ],
     hookspath=[],
     hooksconfig={},
@@ -52,13 +80,16 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# With ROCm the bundle is several GB: too large for a single-file exe (4GB limit, and
+# it would be unpacked on every start), so build a folder with the exe inside instead
+onedir = bool(rocm_files)
+
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+    *([] if onedir else [a.binaries, a.zipfiles, a.datas]),
     [],
+    exclude_binaries=onedir,
     name='SpotlessFilm',
     debug=False,
     bootloader_ignore_signals=False,
@@ -74,6 +105,9 @@ exe = EXE(
     entitlements_file=None,
     icon=None,  # Add icon path here if you have one: 'icon.ico'
 )
+
+if onedir:
+    coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, strip=False, upx=False, name='SpotlessFilm')
 
 # For macOS, create an app bundle
 app = BUNDLE(

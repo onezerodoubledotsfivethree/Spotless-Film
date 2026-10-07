@@ -73,3 +73,6 @@ CLAUDE.md
 
 !docs/app-img.jpg
 !docs/app-preview.png
+
+# PyInstaller distribution package (src/build_executable.py)
+distribution/

@@ -64,69 +64,79 @@ class UNet(nn.Module):
         return torch.sigmoid(self.final(d1))
 
 
-# Try to import LaMa for deep learning inpainting
-try:
-    from lama_cleaner.model_manager import ModelManager
-    from lama_cleaner.schema import Config
-    LAMA_AVAILABLE = True
-except ImportError:
-    LAMA_AVAILABLE = False
+# TorchScript LaMa model (the same file lama-cleaner / IOPaint / simple-lama-inpainting use):
+# https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt
+LAMA_WEIGHTS_NAME = "big-lama.pt"
 
 
 class LamaInpainter:
-    """LaMa deep learning inpainting wrapper"""
-    def __init__(self):
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else 
+    """LaMa deep learning inpainting, loaded directly from the TorchScript weights file"""
+    def __init__(self, weights_path: Optional[str] = None):
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else
                                  "cuda" if torch.cuda.is_available() else "cpu")
+        self.model = None
         self.available = False
-        
-        if LAMA_AVAILABLE:
+
+        if weights_path:
             try:
-                self.model = ModelManager(
-                    name="lama",
-                    device=self.device,
-                    no_half=False,
-                    low_mem=True,
-                    cpu_offload=False,
-                    disable_nsfw=True
-                )
-                self.config = Config(
-                    ldm_steps=20,
-                    ldm_sampler='plms',
-                    hd_strategy='Resize',
-                    hd_strategy_crop_margin=32,
-                    hd_strategy_crop_trigger_size=1024,
-                    hd_strategy_resize_limit=2048,
-                )
+                self.model = torch.jit.load(weights_path, map_location=self.device).eval()
+                if self.device.type != "cpu":
+                    # The first two GPU runs are slow (JIT specialization, kernel tuning)
+                    for _ in range(2):
+                        self._run_model(np.zeros((640, 640, 3), np.uint8), np.zeros((640, 640), np.uint8), 640)
                 self.available = True
-                print("✅ LaMa inpainting model loaded successfully")
+                print(f"✅ LaMa inpainting model loaded from {weights_path}")
             except Exception as e:
                 print(f"Failed to load LaMa: {e}")
-                self.available = False
-    
-    def inpaint(self, image: Image.Image, mask: Image.Image) -> Image.Image:
-        """Inpaint using LaMa or fallback to advanced CV2"""
+
+    def inpaint(self, image: Image.Image, mask: Image.Image,
+                progress_callback: Optional[callable] = None,
+                tile_size: int = 512, margin: int = 64) -> Image.Image:
+        """Inpaint masked pixels at full resolution.
+
+        Only tiles that contain mask pixels are run through the model, each with a
+        margin of surrounding context; pixels outside the mask are left untouched.
+        """
         if not self.available:
-            return self._fallback_inpaint(image, mask)
-        
-        try:
-            # Convert to numpy
-            image_np = np.array(image.convert('RGB'))
-            mask_np = np.array(mask.convert('L'))
-                
-            result = self.model(image_np, mask_np, self.config)
-            return Image.fromarray(result)
-            
-        except Exception as e:
-            print(f"LaMa failed: {e}, falling back to CV2")
-            return self._fallback_inpaint(image, mask)
-    
-    def _fallback_inpaint(self, image: Image.Image, mask: Image.Image) -> Image.Image:
-        """Fallback to TELEA CV2 inpainting with a single pass (radius=5)."""
+            raise RuntimeError(f"LaMa model is not loaded ({LAMA_WEIGHTS_NAME} not found in weights/)")
+
         image_np = np.array(image.convert('RGB'))
         mask_np = np.array(mask.convert('L'))
-        result = cv2.inpaint(image_np, mask_np, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        height, width = mask_np.shape
+        result = image_np.copy()
+
+        # Every crop has the same size (shifted inwards at the image borders): on GPU
+        # each new input shape costs several seconds of kernel tuning
+        window = tile_size + 2 * margin
+        tiles = [(y, x) for y in range(0, height, tile_size) for x in range(0, width, tile_size)
+                 if mask_np[y:y + tile_size, x:x + tile_size].any()]
+        for i, (y, x) in enumerate(tiles):
+            y0 = max(0, min(y - margin, height - window))
+            x0 = max(0, min(x - margin, width - window))
+            y1, x1 = min(height, y0 + window), min(width, x0 + window)
+            out = self._run_model(image_np[y0:y1, x0:x1], mask_np[y0:y1, x0:x1], window)
+            tile_mask = mask_np[y:y + tile_size, x:x + tile_size] > 0
+            th, tw = tile_mask.shape
+            result[y:y + th, x:x + tw][tile_mask] = out[y - y0:y - y0 + th, x - x0:x - x0 + tw][tile_mask]
+            if progress_callback:
+                progress_callback((i + 1) / len(tiles))
+
+        print(f"✅ LaMa inpainting completed ({len(tiles)} tiles)")
         return Image.fromarray(result)
+
+    def _run_model(self, image_np: np.ndarray, mask_np: np.ndarray, window: int) -> np.ndarray:
+        """Run LaMa on one RGB crop, padded up to window x window (a multiple of 8)"""
+        h, w = mask_np.shape
+        pad_h, pad_w = window - h, window - w
+        image_np = np.pad(image_np, ((0, pad_h), (0, pad_w), (0, 0)), mode='symmetric')
+        mask_np = np.pad(mask_np, ((0, pad_h), (0, pad_w)), mode='symmetric')
+
+        image_t = torch.from_numpy(image_np.transpose(2, 0, 1)[None].astype(np.float32) / 255.0)
+        mask_t = torch.from_numpy((mask_np[None, None] > 0).astype(np.float32))
+        with torch.inference_mode():
+            out = self.model(image_t.to(self.device), mask_t.to(self.device))
+        out = out[0].permute(1, 2, 0).cpu().numpy()
+        return np.clip(out * 255, 0, 255).astype(np.uint8)[:h, :w]
 
 
 class ImageProcessingService:

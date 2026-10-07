@@ -95,6 +95,8 @@ The large size is normal - it includes Python, PyTorch, and all dependencies.
 
 **Important**: Make sure your model weights (`.pth` files) are in the `src/weights/` directory before building. Download them from [Google Drive](https://drive.google.com/file/d/1yR4gk2SgU0-p_EOrihckt3gFE8_lYyq7/view?usp=sharing) and extract the `.pth` files directly into `src/weights/` (e.g. `src/weights/v5_bce_unet_epoch30.pth`, no nested folder). The executable will include them automatically.
 
+**Optional LaMa inpainting**: put [big-lama.pt](https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt) (~200MB) into `src/weights/` as well. It enables the OpenCV/LaMa switch in the Dust Removal section and is bundled into the executable when present. No extra Python packages are needed.
+
 ## Platform-Specific Notes
 
 ### macOS

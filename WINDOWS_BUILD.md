@@ -31,6 +31,11 @@
      the `.pth` files must be right inside `src\weights\`, otherwise the build fails
      or the app can't find the model.
 
+   - **Optional, for LaMa inpainting:** download
+     [big-lama.pt](https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt) (~200MB)
+     into the same `src\weights\` folder. This enables the OpenCV/LaMa switch in the
+     Dust Removal section; without the file the app uses OpenCV only.
+
 5. **Install required packages:**
    ```cmd
    pip install pyinstaller torch torchvision pillow customtkinter tkinterdnd2 opencv-python numpy
@@ -55,6 +60,8 @@ pyinstaller --onefile --windowed --collect-all tkinterdnd2 --add-data "weights\*
 ```
 
 The .exe will be in `dist\SpotlessFilm.exe`
+
+To bundle LaMa in the simple build, add `--add-data "weights\big-lama.pt;weights"`.
 
 ## File Size
 Expect ~300-800MB for the Windows executable (includes all dependencies).

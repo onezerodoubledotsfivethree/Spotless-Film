@@ -14,9 +14,8 @@ scipy>=1.11.0
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Optional: LaMa Inpainting (advanced)
-# Requires Rust compiler for installation
-# lama-cleaner>=1.2.0
+# Optional: LaMa Inpainting needs no extra packages, only the weights file
+# weights/big-lama.pt (see BUILD_INSTRUCTIONS.md)
 
 # Progress and UI
 tqdm>=4.65.0
@@ -42,5 +41,5 @@ pathlib2>=2.3.7; python_version < '3.4'
 
 # Note: Install instructions:
 # 1. Basic installation: pip install -r requirements_professional.txt
-# 2. For LaMa support: pip install lama-cleaner (requires Rust)
+# 2. For LaMa support: download big-lama.pt into weights/
 # 3. For CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118

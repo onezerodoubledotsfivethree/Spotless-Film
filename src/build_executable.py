@@ -102,6 +102,7 @@ def create_distribution():
     import platform
     system = platform.system()
     
+    bundled_weights = False
     if system == "Darwin":
         # Copy the .app bundle
         if Path("dist/SpotlessFilm.app").exists():
@@ -109,12 +110,16 @@ def create_distribution():
     else:
         # Copy the executable
         exe_name = f"SpotlessFilm{'.exe' if system == 'Windows' else ''}"
-        if Path(f"dist/{exe_name}").exists():
+        if Path("dist/SpotlessFilm").is_dir():
+            # Folder build (GPU/ROCm): several GB with the weights already inside, so move it
+            shutil.move("dist/SpotlessFilm", dist_dir / "SpotlessFilm")
+            bundled_weights = True
+        elif Path(f"dist/{exe_name}").exists():
             shutil.copy2(f"dist/{exe_name}", dist_dir / exe_name)
-    
+
     # Copy model weights if they exist
     weights_dir = Path("weights")
-    if weights_dir.exists():
+    if weights_dir.exists() and not bundled_weights:
         shutil.copytree(weights_dir, dist_dir / "weights")
         print("📦 Model weights included")
     
